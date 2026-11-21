@@ -12,10 +12,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out this repo (mod files)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Clone bridge source at pinned commit
         run: |
           git clone https://github.com/OhiyoX/xiaomi-health-connect-bridge.git src
           git -C src checkout 3043528a85b8e0f4cdeb738bb84b32a7a23f0243
+
+      - name: Apply miku mod patch
+        run: |
+          git -C src apply mod/miku-mod.patch
+          git -C src status --porcelain
+
+      - name: Ensure fixed debug keystore
+        run: |
+          if [ ! -f mod/debug.keystore ]; then
+            keytool -genkeypair -keystore mod/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=HC Bridge Debug,O=Harness,C=CN"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add mod/debug.keystore
+            git commit -m "chore: fixed debug keystore [skip ci]"
+            git push
+          fi
+          cp mod/debug.keystore src/debug.keystore
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -41,8 +63,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
+          gh release delete "apk-build-4" --yes --cleanup-tag || true
           if [ -f src/app/build/outputs/apk/debug/app-debug.apk ]; then
-            gh release create "apk-build-3" src/app/build/outputs/apk/debug/app-debug.apk build.log --title "hc-bridge debug APK (build 3)" --notes "APK + build log"
+            gh release create "apk-build-4" src/app/build/outputs/apk/debug/app-debug.apk build.log --title "hc-bridge mod APK (build 4)" --notes "Modded build: watch steps always sync, hide-from-recents toggle, custom icon. APK + build log"
           else
-            gh release create "apk-build-3" build.log --title "hc-bridge build 3 log (no APK)" --notes "Build failed; log attached for diagnosis"
+            gh release create "apk-build-4" build.log --title "hc-bridge build 4 log (no APK)" --notes "Build failed; log attached for diagnosis"
           fi
