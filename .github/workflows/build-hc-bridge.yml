@@ -39,9 +39,10 @@ jobs:
       - name: Publish release with APK and/or log
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if [ -f src/app/build/outputs/apk/debug/app-debug.apk ]; then
-            gh release create "apk-build-2" src/app/build/outputs/apk/debug/app-debug.apk build.log --title "hc-bridge debug APK (build 2)" --notes "APK + build log"
+            gh release create "apk-build-3" src/app/build/outputs/apk/debug/app-debug.apk build.log --title "hc-bridge debug APK (build 3)" --notes "APK + build log"
           else
-            gh release create "apk-build-2" build.log --title "hc-bridge build 2 log (no APK)" --notes "Build failed; log attached for diagnosis"
+            gh release create "apk-build-3" build.log --title "hc-bridge build 3 log (no APK)" --notes "Build failed; log attached for diagnosis"
           fi
