@@ -24,7 +24,7 @@ jobs:
 
       - name: Apply miku mod patch
         run: |
-          git -C src apply mod/miku-mod.patch
+          git -C src apply "$GITHUB_WORKSPACE/mod/miku-mod.patch"
           git -C src status --porcelain
 
       - name: Ensure fixed debug keystore
