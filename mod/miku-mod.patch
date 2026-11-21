@@ -1,0 +1,290 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index ce96fc4..b7b5ec7 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -16,13 +16,30 @@ android {
+         applicationId "id.harness.hcbridge"
+         minSdk 28
+         targetSdk 34
+-        versionCode 19
+-        versionName "0.9.0"
++        versionCode 20
++        versionName "0.9.1"
+         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+         buildConfigField "long", "BUILD_EPOCH_MS", "${buildEpochMs}L"
+         buildConfigField "String", "BUILD_ZONE", "\"$buildZone\""
+     }
+ 
++    // 固定调试签名：keystore 由 CI 在仓库根目录生成并回存（debug.keystore），
++    // 保证每次构建签名一致、新版能覆盖安装，不用卸载重登。
++    signingConfigs {
++        fixed {
++            storeFile rootProject.file("debug.keystore")
++            storePassword "android"
++            keyAlias "androiddebugkey"
++            keyPassword "android"
++        }
++    }
++
++    buildTypes {
++        debug {
++            signingConfig signingConfigs.fixed
++        }
++    }
++
+     compileOptions {
+         sourceCompatibility JavaVersion.VERSION_17
+         targetCompatibility JavaVersion.VERSION_17
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index da5230d..337248b 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -67,7 +67,9 @@
+     <application
+         android:name=".App"
+         android:allowBackup="false"
++        android:icon="@mipmap/ic_launcher"
+         android:label="HC Bridge"
++        android:roundIcon="@mipmap/ic_launcher_round"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.HCBridge">
+ 
+diff --git a/app/src/main/java/id/harness/hcbridge/HcWriter.kt b/app/src/main/java/id/harness/hcbridge/HcWriter.kt
+index 32038f1..68ce1d1 100644
+--- a/app/src/main/java/id/harness/hcbridge/HcWriter.kt
++++ b/app/src/main/java/id/harness/hcbridge/HcWriter.kt
+@@ -670,7 +670,7 @@ object HcWriter {
+         return n
+     }
+ 
+-    /** 步数（按小时聚合；只用于"HC 该天为 0"的补洞，避免与小米自身写入重复计入） */
++    /** 步数（按小时聚合；手表步数始终写入，固定 clientRecordId 保证重复同步幂等更新） */
+     suspend fun insertSteps(
+         client: HealthConnectClient,
+         hourly: List<Triple<Long, Long, Double>>, // (hourStart, steps, distanceM)
+diff --git a/app/src/main/java/id/harness/hcbridge/MainActivity.kt b/app/src/main/java/id/harness/hcbridge/MainActivity.kt
+index 6104763..4bc2b21 100644
+--- a/app/src/main/java/id/harness/hcbridge/MainActivity.kt
++++ b/app/src/main/java/id/harness/hcbridge/MainActivity.kt
+@@ -1,5 +1,6 @@
+ package id.harness.hcbridge
+ 
++import android.app.ActivityManager
+ import android.content.Intent
+ import android.os.Bundle
+ import android.view.Gravity
+@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
+     override fun onCreate(b: Bundle?) {
+         super.onCreate(b)
+         applySystemBarAppearance()
++        applyRecentsVisibility()
+         setContentView(R.layout.activity_shell)
+         container = findViewById(R.id.container)
+         nav = findViewById(R.id.nav)
+@@ -531,6 +533,15 @@ class MainActivity : AppCompatActivity() {
+                 toast(if (on) "已开启，重启 app 生效" else "已关闭，重启 app 生效")
+             }
+         }
++        settings.findViewById<MaterialSwitch>(R.id.switchHideRecents).apply {
++            isChecked = Prefs.hideFromRecents(this@MainActivity)
++            setOnCheckedChangeListener { _, on ->
++                Prefs.setHideFromRecents(this@MainActivity, on)
++                applyRecentsVisibility()
++                AppLog.log(this@MainActivity, "ui", "最近任务隐藏 → $on")
++                toast(if (on) "已开启：最近任务里不再显示本 app" else "已关闭：最近任务里正常显示")
++            }
++        }
+         settings.findViewById<MaterialSwitch>(R.id.switchAllowShot).apply {
+             visibility = if (BuildConfig.DEBUG) View.VISIBLE else View.GONE
+             isChecked = Prefs.adminAllowScreenshot(this@MainActivity)
+@@ -558,6 +569,16 @@ class MainActivity : AppCompatActivity() {
+         bindAuthMigrationNotice()
+     }
+ 
++    /** 按「在最近任务中隐藏」设置，切换本 app 全部任务在最近任务列表里的可见性。 */
++    private fun applyRecentsVisibility() {
++        val on = Prefs.hideFromRecents(this)
++        runCatching {
++            getSystemService(ActivityManager::class.java)?.appTasks?.forEach {
++                it.setExcludeFromRecents(on)
++            }
++        }
++    }
++
+     /**
+      * 打开 MCP 管理页（0.9.0 起默认是共享前端 `McpWebAdminActivity`）。
+      *
+diff --git a/app/src/main/java/id/harness/hcbridge/Prefs.kt b/app/src/main/java/id/harness/hcbridge/Prefs.kt
+index 7d73ae4..e733f22 100644
+--- a/app/src/main/java/id/harness/hcbridge/Prefs.kt
++++ b/app/src/main/java/id/harness/hcbridge/Prefs.kt
+@@ -64,6 +64,12 @@ object Prefs {
+     fun setAdminAllowScreenshot(c: Context, on: Boolean) =
+         get(c).edit().putBoolean(K_ALLOW_SHOT, on).apply()
+ 
++    // 隐私：在最近任务列表中隐藏本 app（默认关闭；开启后由 MainActivity 调 setExcludeFromRecents）
++    private const val K_HIDE_RECENTS = "hideFromRecents"
++    fun hideFromRecents(c: Context): Boolean = get(c).getBoolean(K_HIDE_RECENTS, false)
++    fun setHideFromRecents(c: Context, on: Boolean) =
++        get(c).edit().putBoolean(K_HIDE_RECENTS, on).apply()
++
+     // HC 心率覆盖率缓存（coverage 要扫全表，很贵；持久化 + 6h TTL）
+     fun coverageCache(c: Context): Triple<Int, Int, Long>? {
+         val v = get(c).getString("coverage_hr", null) ?: return null
+diff --git a/app/src/main/java/id/harness/hcbridge/SyncWorker.kt b/app/src/main/java/id/harness/hcbridge/SyncWorker.kt
+index f076cc8..89c5982 100644
+--- a/app/src/main/java/id/harness/hcbridge/SyncWorker.kt
++++ b/app/src/main/java/id/harness/hcbridge/SyncWorker.kt
+@@ -639,7 +639,11 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
+             val n = HcWriter.insertSpo2(client, samples, zone)
+             if (n > 0) msg += "spo2=$n "
+         }.onFailure { if (msg.length < 100) msg += "spo2Err=${it.message?.take(40)} " }
+-        // 步数缺口
++        // 步数（手表）：始终写入。旧逻辑是「HC 当天总量 > 0 就跳过」的补洞式写法，
++        // 但手机系统自己记的步数也会让总量 > 0，结果手表步数永远写不进去
++        // （数据页又刻意不算手机来源，于是当天步数显示为空）。
++        // 现在只认手表（云端）步数：每小时一条、固定 clientRecordId，
++        // 重复同步是更新同一条、不会重复计数；当天未结束的小时也会随同步刷新。
+         runCatching {
+             val raw = CloudApi.fetchValues(session, "steps", from, to)
+             track(seen, "steps", raw)
+@@ -647,16 +651,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
+                 java.time.LocalDate.ofInstant(java.time.Instant.ofEpochSecond(it.first), zone)
+             }
+             val hourly = ArrayList<Triple<Long, Long, Double>>()
+-            for ((day, items) in byDay) {
+-                val s = day.atStartOfDay(zone).toInstant()
+-                val e = day.plusDays(1).atStartOfDay(zone).toInstant()
+-                val hcSteps = client.aggregate(
+-                    androidx.health.connect.client.request.AggregateRequest(
+-                        setOf(androidx.health.connect.client.records.StepsRecord.COUNT_TOTAL),
+-                        androidx.health.connect.client.time.TimeRangeFilter.between(s, e)
+-                    )
+-                ).get(androidx.health.connect.client.records.StepsRecord.COUNT_TOTAL) ?: 0L
+-                if (hcSteps > 0) continue
++            for ((_, items) in byDay) {
+                 val perHour = HashMap<Long, Pair<Long, Double>>()
+                 for ((t, v) in items) {
+                     val h = t / 3600 * 3600
+@@ -668,7 +663,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
+                 for ((h, pair) in perHour) if (pair.first > 0) hourly.add(Triple(h, pair.first, pair.second))
+             }
+             val n = HcWriter.insertSteps(client, hourly, zone)
+-            if (n > 0) msg += "stepsGapFill=$n "
++            if (n > 0) msg += "steps=$n "
+         }.onFailure { if (msg.length < 100) msg += "stepsErr=${it.message?.take(40)} " }
+         // 体重（小米 app 不往 HC 写体重，云端有体称记录；同 ts 已有的跳过）
+         runCatching {
+diff --git a/app/src/main/res/drawable/ic_launcher_foreground.xml b/app/src/main/res/drawable/ic_launcher_foreground.xml
+new file mode 100644
+index 0000000..1c0cd06
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_launcher_foreground.xml
+@@ -0,0 +1,21 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- miku 设计：青色底上的白色爱心，心电脉冲线以底色镂空穿过爱心。 -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="108dp"
++    android:height="108dp"
++    android:viewportWidth="108"
++    android:viewportHeight="108">
++
++    <!-- 白色爱心 -->
++    <path
++        android:pathData="M54,77 C40,65 30,56 30,45 C30,37 36,31 44,31 C48,31 52,34 54,38 C56,34 60,31 64,31 C72,31 78,37 78,45 C78,56 68,65 54,77 Z"
++        android:fillColor="#FFFFFF" />
++
++    <!-- 心电脉冲线（底色镂空） -->
++    <path
++        android:pathData="M33,54 L45,54 L49.5,45 L56,63 L60.5,54 L75,54"
++        android:strokeColor="#0E9594"
++        android:strokeWidth="4.2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/app/src/main/res/layout/view_settings.xml b/app/src/main/res/layout/view_settings.xml
+index d75de65..ba5bd7f 100644
+--- a/app/src/main/res/layout/view_settings.xml
++++ b/app/src/main/res/layout/view_settings.xml
+@@ -447,6 +447,48 @@
+                 </LinearLayout>
+             </com.google.android.material.card.MaterialCardView>
+ 
++            <TextView
++                style="@style/SettingsSection"
++                android:text="隐私" />
++
++            <com.google.android.material.card.MaterialCardView
++                style="@style/SettingsCard">
++
++                <LinearLayout
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:gravity="center_vertical"
++                    android:orientation="horizontal"
++                    android:padding="16dp">
++
++                    <LinearLayout
++                        android:layout_width="0dp"
++                        android:layout_height="wrap_content"
++                        android:layout_weight="1"
++                        android:orientation="vertical">
++
++                        <TextView
++                            android:layout_width="match_parent"
++                            android:layout_height="wrap_content"
++                            android:text="在最近任务中隐藏"
++                            android:textAppearance="?attr/textAppearanceTitleSmall" />
++
++                        <TextView
++                            android:layout_width="match_parent"
++                            android:layout_height="wrap_content"
++                            android:text="开启后，最近任务列表里看不到本 app"
++                            android:textAppearance="?attr/textAppearanceBodySmall"
++                            android:textColor="?attr/colorOnSurfaceVariant" />
++                    </LinearLayout>
++
++                    <com.google.android.material.materialswitch.MaterialSwitch
++                        android:id="@+id/switchHideRecents"
++                        android:layout_width="wrap_content"
++                        android:layout_height="wrap_content"
++                        android:contentDescription="在最近任务中隐藏" />
++                </LinearLayout>
++            </com.google.android.material.card.MaterialCardView>
++
+             <TextView
+                 style="@style/SettingsSection"
+                 android:text="诊断" />
+diff --git a/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+new file mode 100644
+index 0000000..a8a8fa5
+--- /dev/null
++++ b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
++    <background android:drawable="@color/ic_launcher_background" />
++    <foreground android:drawable="@drawable/ic_launcher_foreground" />
++</adaptive-icon>
+diff --git a/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml b/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+new file mode 100644
+index 0000000..a8a8fa5
+--- /dev/null
++++ b/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
++    <background android:drawable="@color/ic_launcher_background" />
++    <foreground android:drawable="@drawable/ic_launcher_foreground" />
++</adaptive-icon>
+diff --git a/app/src/main/res/values/ic_launcher_colors.xml b/app/src/main/res/values/ic_launcher_colors.xml
+new file mode 100644
+index 0000000..2453303
+--- /dev/null
++++ b/app/src/main/res/values/ic_launcher_colors.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- miku 定制图标：青色底（与 ic_launcher_foreground 里的脉冲线镂空色一致） -->
++    <color name="ic_launcher_background">#0E9594</color>
++</resources>
